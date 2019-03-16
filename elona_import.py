@@ -99,11 +99,6 @@ class Elona(T.Plugin):
         with gzip.open(idx, 'rb') as fh:
             mdata = MapData()
             mdata.unpack(fh)
-            print(mdata.width)
-            print(mdata.height)
-            print(mdata.atlas)
-            print(mdata.regen)
-            print(mdata.stairup)
         with gzip.open(f, 'rb') as fh:
             tiles = fh.read(mdata.width * mdata.height * 4)
             tiles = unpack('I' * mdata.width * mdata.height, tiles)
@@ -120,8 +115,6 @@ class Elona(T.Plugin):
                 for i in range(300):
                     dat = fh.read(5 * 4)
                     dat = unpack("IIIII", dat)
-                    print(str(dat[0]) + " " + str(dat[1]) + " " +
-                          str(dat[2]) + " " + str(dat[3]) + " " + str(dat[4]))
                     if dat[0] != 0:
                         if dat[4] == 0:
                             items.append(
