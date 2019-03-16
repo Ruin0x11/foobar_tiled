@@ -13,9 +13,6 @@ from collections import namedtuple
 from math import floor
 import gzip
 
-maps = {}
-tilesets = {}
-
 
 def getfile(path, ext):
     return splitext(path)[0] + "." + ext
@@ -37,7 +34,6 @@ class Elona(T.Plugin):
 
         m = T.Tiled.Map(T.Tiled.Map.Orthogonal, el.mdata.width,
                         el.mdata.height, 48, 48)
-        maps[f] = m
 
         root = '/home/ruin/Documents'
         atlas = root + '/map%01i.tsx' % el.mdata.atlas
