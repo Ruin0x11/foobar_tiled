@@ -43,31 +43,24 @@ def find_tile(m, id):
 
 
 def collect_mapping(mdata):
-    i = 0
-    found = dict()
     mapping = dict()
     for y in range(mdata.height()):
         for x in range(mdata.width()):
             tile = mdata.cellAt(x, y).tile()
-            if not tile.id() in found:
-                found[tile.id()] = i
-                mapping[i] = tile.propertyAsString("id")
-                i += 1
+            if not tile.id() in mapping:
+                mapping[tile.id()] = tile.propertyAsString("id")
     return mapping
 
 
 def collect_object_mapping(objs):
-    i = 0
     found = dict()
     mapping = dict()
     for i in range(objs.objectCount()):
         o = objs.objectAt(i)
         tile = o.cell().tile()
         id = tile.id()
-        if not id in found:
-            found[id] = i
-            mapping[i] = tile.propertyAsString("id")
-            i += 1
+        if not id in mapping:
+            mapping[id] = tile.propertyAsString("id")
     return mapping
 
 
@@ -107,7 +100,6 @@ def write_properties(out, obj, found):
         if key == "id":
             continue
         out.write(pack("I", found[key]))
-        out.write(b"\0")
         out.write(pack("I", int(obj.propertyAsString(key))))
 
 
@@ -121,8 +113,7 @@ def write_object_group(out, m, name, kind, maximum):
         raise Exception("You can only place " + str(maximum) +
                         " items in layer " + name + ".")
 
-    out.write(str.encode(kind))
-    out.write(b"\0")
+    write_string(out, kind)
 
     write_mapping(out, mapping)
     write_props_mapping(out, props_mapping)
@@ -145,16 +136,19 @@ def write_mapping(out, mapping):
     out.write(pack("I", len(mapping)))
     for k, v in mapping.items():
         out.write(pack("I", k))
-        out.write(str.encode(v))
-        out.write(b"\0")
+        write_string(out, v)
 
 
 def write_props_mapping(out, mapping):
     out.write(pack("I", len(mapping)))
     for k, v in mapping.items():
-        out.write(str.encode(v))
-        out.write(b"\0")
+        write_string(out, v)
         out.write(pack("I", k))
+
+
+def write_string(out, s):
+    out.write(str.encode(s))
+    out.write(b"\0")
 
 
 class ElonaFoobar(T.Plugin):
@@ -196,8 +190,7 @@ class ElonaFoobar(T.Plugin):
 
             for key in mdata.properties().keys():
                 # TODO handle string properties
-                out.write(str.encode(key))
-                out.write(b"\0")
+                write_string(out, key)
                 out.write(pack("I", int(mdata.propertyAsString(key))))
 
             write_object_group(out, m, "Characters", "core.chara", 188)
