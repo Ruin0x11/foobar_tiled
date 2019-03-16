@@ -14,6 +14,14 @@ from math import floor
 import gzip
 
 
+def represents_int(s):
+    try:
+        int(s)
+        return True
+    except ValueError:
+        return False
+
+
 def find_layer(m, name):
     for i in range(m.layerCount()):
         if T.isTileLayerAt(m, i):
@@ -94,8 +102,9 @@ def read_properties(fh, mapping):
     mapping_len = unpack("I", fh.read(4))[0]
 
     for i in range(mapping_len):
-        idx, val = unpack("II", fh.read(4 * 2))
+        idx = unpack("I", fh.read(4))[0]
         key = mapping[idx]
+        val = read_typed_value(fh)
         props[key] = val
 
     return props
@@ -109,12 +118,18 @@ def write_properties(out, obj, found):
 
     out.write(pack("I", prop_len))
     for key in obj.properties().keys():
-        # TODO handle string properties
-        print(key)
         if key == "id":
             continue
+
         out.write(pack("I", found[key]))
-        out.write(pack("I", int(obj.propertyAsString(key))))
+
+        prop = obj.propertyAsString(key)
+        if represents_int(prop):
+            out.write(pack("b", 0))
+            out.write(pack("I", int(prop)))
+        else:
+            out.write(pack("b", 1))
+            write_string(out, prop)
 
 
 def read_object_group(fh):
@@ -153,8 +168,8 @@ def write_object_group(out, m, name, kind, maximum):
     for i in range(objs.objectCount()):
         obj = objs.objectAt(i)
 
-        x = int(obj.x() / 48)
-        y = int(obj.y() / 48) - 1
+        x = floor(obj.x() / 48.0)
+        y = floor(obj.y() / 48.0)
         if obj.height() == 96:
             y += 1
         out.write(pack("III", obj.cell().tile().id(), x, y))
@@ -163,7 +178,16 @@ def write_object_group(out, m, name, kind, maximum):
 
 
 def read_string(fh):
-    return ''.join(iter(lambda: fh.read(1).decode('ascii'), '\x00'))
+    return "".join(iter(lambda: fh.read(1).decode("ascii"), "\x00"))
+
+
+def read_typed_value(fh):
+    ty = unpack("b", fh.read(1))[0]
+    if ty == 0:
+        val = unpack("I", fh.read(4))[0]
+    elif ty == 1:
+        val = read_string(fh)
+    return val
 
 
 def read_mapping(fh):
@@ -195,13 +219,16 @@ class ElonaFoobar(T.Plugin):
 
     @classmethod
     def supportsFile(cls, f):
-        return open(f, 'rb').read(4) == b'FOOM'
+        return open(f, "rb").read(4) == b"FMP "
 
     @classmethod
     def read(cls, f):
         foo = ElonaFoobar(f)
 
         m = T.Tiled.Map(T.Tiled.Map.Orthogonal, foo.width, foo.height, 48, 48)
+
+        for k, v in foo.mdata.items():
+            m.setProperty(k, v)
 
         root = '/home/ruin/Documents'
         atlas = root + '/map%01i.tsx' % foo.mdata["atlas"]
@@ -249,19 +276,19 @@ class ElonaFoobar(T.Plugin):
             for i in range(mod_count):
                 mod = read_string(fh)
 
-            self.width, self.height = unpack("II", fh.read(2 * 4))
-
-            mapping = read_mapping(fh)
-
-            self.tiles = list(
-                unpack("I" * (self.width * self.height), fh.read(self.width * self.height * 4)))
-
             prop_len = unpack("I", fh.read(4))[0]
             self.mdata = dict()
             for i in range(prop_len):
                 key = read_string(fh)
-                val = unpack("I", fh.read(4))[0]
+                val = read_typed_value(fh)
                 self.mdata[key] = val
+
+            mapping = read_mapping(fh)
+
+            self.width, self.height = unpack("II", fh.read(2 * 4))
+
+            self.tiles = list(
+                unpack("I" * (self.width * self.height), fh.read(self.width * self.height * 4)))
 
             count = unpack("I", fh.read(4))[0]
 
@@ -280,9 +307,6 @@ class ElonaFoobar(T.Plugin):
                     if ti != None:
                         l.setCell(x, y, T.Tiled.Cell(ti))
 
-        for k, v in self.mdata.items():
-            l.setProperty(k, v)
-
         return l
 
     def populate_map_objects(self, t, objs, name):
@@ -291,8 +315,11 @@ class ElonaFoobar(T.Plugin):
             if obj.id < t.tileCount():
                 ti = t.tileAt(obj.id)
                 if ti != None:
+                    offset_y = 0
+                    if ti.height() == 96:
+                        offset_y = -48
                     map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
-                        obj.x * 48, obj.y * 48 + 48), T.qt.QSizeF(48, 48))
+                        obj.x * 48, obj.y * 48 + offset_y), T.qt.QSizeF(ti.width(), ti.height()))
                     # TODO
                     # map_object.setProperty("id", ti.propertyAsString("id"))
                     for k, v in obj.props.items():
@@ -308,7 +335,7 @@ class ElonaFoobar(T.Plugin):
                 ti = t.tileAt(obj.id)
                 if ti != None:
                     map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
-                        obj.x * 48, obj.y * 48 + 48), T.qt.QSizeF(48, 48))
+                        obj.x * 48, obj.y * 48), T.qt.QSizeF(48, 48))
                     for k, v in obj.props.items():
                         map_object.setProperty(k, v)
                     # TODO
@@ -327,7 +354,7 @@ class ElonaFoobar(T.Plugin):
         mods = ["core"]
 
         with gzip.open(splitext(fn)[0] + ".fmp", "wb") as out:
-            out.write(pack("4s", b"FOOM"))
+            out.write(pack("4s", b"FMP "))
 
             version = 1
             out.write(pack("I", version))
@@ -336,22 +363,29 @@ class ElonaFoobar(T.Plugin):
             for mod in mods:
                 write_string(out, mod)
 
-            mapping = collect_mapping(mdata)
-
-            out.write(pack("II", m.width(), m.height()))
-            write_mapping(out, mapping)
-            tiles = encode_tiles(mdata)
-            out.write(tiles)
-
             prop_len = 0
-            for key in mdata.properties().keys():
+            for key in m.properties().keys():
                 prop_len += 1
             out.write(pack("I", prop_len))
 
-            for key in mdata.properties().keys():
-                # TODO handle string properties
+            for key in m.properties().keys():
                 write_string(out, key)
-                out.write(pack("I", int(mdata.propertyAsString(key))))
+
+                prop = m.propertyAsString(key)
+                if represents_int(prop):
+                    out.write(pack("b", 0))
+                    out.write(pack("I", int(prop)))
+                else:
+                    out.write(pack("b", 1))
+                    write_string(out, prop)
+
+            mapping = collect_mapping(mdata)
+            write_mapping(out, mapping)
+
+            out.write(pack("II", m.width(), m.height()))
+
+            tiles = encode_tiles(mdata)
+            out.write(tiles)
 
             out.write(pack("I", 3))
             write_object_group(out, m, "Characters", "core.chara", 188)

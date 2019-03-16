@@ -35,6 +35,10 @@ class Elona(T.Plugin):
         m = T.Tiled.Map(T.Tiled.Map.Orthogonal, el.mdata.width,
                         el.mdata.height, 48, 48)
 
+        m.setProperty("atlas", el.mdata.atlas)
+        m.setProperty("next_regenerate_date", el.mdata.regen)
+        m.setProperty("stair_up_pos", el.mdata.stairup)
+
         root = '/home/ruin/Documents'
         atlas = root + '/map%01i.tsx' % el.mdata.atlas
         # atlas = utils.find_sensitive_path(dirname(f)+'/../graphic/map', atlas)
@@ -119,8 +123,9 @@ class Elona(T.Plugin):
                             charas.append(
                                 Character(id=dat[0], x=dat[1], y=dat[2]))
                         elif dat[4] == 2:
-                            objs.append(
-                                Object(id=self.cell_objs[dat[0]][1], x=dat[1], y=dat[2], param1=self.cell_objs[dat[0]][0], param2=(dat[3] % 1000), param3=(floor(dat[3] / 1000))))
+                            if dat[0] in self.cell_objs:
+                                objs.append(
+                                    Object(id=self.cell_objs[dat[0]][1], x=dat[1], y=dat[2], param1=self.cell_objs[dat[0]][0], param2=(dat[3] % 1000), param3=(floor(dat[3] / 1000))))
 
         self.mdata = mdata
         self.tiles = tiles
@@ -139,10 +144,6 @@ class Elona(T.Plugin):
                     if ti != None:
                         l.setCell(x, y, T.Tiled.Cell(ti))
 
-        l.setProperty("atlas", self.mdata.atlas)
-        l.setProperty("next_regenerate_date", self.mdata.regen)
-        l.setProperty("stair_up_pos", self.mdata.stairup)
-
         return l
 
     def populate_items(self, t):
@@ -152,7 +153,7 @@ class Elona(T.Plugin):
                 ti = t.tileAt(item.id)
                 if ti != None:
                     map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
-                        item.x * 48, item.y * 48 + 48), T.qt.QSizeF(48, 48))
+                        item.x * 48, item.y * 48 + 48), T.qt.QSizeF(ti.width(), ti.height()))
                     map_object.setProperty("id", ti.propertyAsString("id"))
                     map_object.setProperty("own_state", item.own_state)
                     map_object.setCell(T.Tiled.Cell(ti))
@@ -166,7 +167,7 @@ class Elona(T.Plugin):
                 ti = t.tileAt(chara.id)
                 if ti != None:
                     map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
-                        chara.x * 48, chara.y * 48 + 48), T.qt.QSizeF(48, 48))
+                        chara.x * 48, chara.y * 48 + 48), T.qt.QSizeF(ti.width(), ti.height()))
                     map_object.setProperty("id", ti.propertyAsString("id"))
                     map_object.setCell(T.Tiled.Cell(ti))
                     o.addObject(map_object)
