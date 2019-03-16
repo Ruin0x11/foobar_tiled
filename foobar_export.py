@@ -6,12 +6,11 @@ import sys
 import re
 import tiled as T
 from os.path import dirname, splitext, basename, exists
-from lib import cpystruct, lua_table_writer
+from lib import cpystruct
 from struct import pack, unpack
 from collections import namedtuple
 from math import floor
-from base64 import b64encode
-import zlib
+import gzip
 
 
 def find_layer(m, name):
@@ -54,52 +53,108 @@ def collect_mapping(mdata):
                 found[tile.id()] = i
                 mapping[i] = tile.propertyAsString("id")
                 i += 1
+    return mapping
+
+
+def collect_object_mapping(objs):
+    i = 0
+    found = dict()
+    mapping = dict()
+    for i in range(objs.objectCount()):
+        o = objs.objectAt(i)
+        tile = o.cell().tile()
+        id = tile.id()
+        if not id in found:
+            found[id] = i
+            mapping[i] = tile.propertyAsString("id")
+            i += 1
+    return mapping
+
+
+def collect_properties_mapping(objs):
+    i = 0
+    found = dict()
+    mapping = dict()
+    for i in range(objs.objectCount()):
+        o = objs.objectAt(i)
+        for key in o.properties().keys():
+            if not key in found:
+                found[key] = i
+                mapping[i] = key
+                i += 1
     return (mapping, found)
 
 
-def encode_tiles(mdata, found):
+def encode_tiles(mdata):
     tiles = bytearray()
     for y in range(mdata.height()):
         for x in range(mdata.width()):
             tile = mdata.cellAt(x, y).tile()
-            id = found[tile.id()]
+            id = tile.id()
             tiles.extend(pack("I", id))
-    tiles = zlib.compress(tiles)
-    tiles = b64encode(tiles)
-    return str(tiles)
+    return tiles
 
 
-def write_object_group(out, m, name, kind):
+def write_properties(out, obj, found):
+    prop_len = 0
+    for key in obj.properties().keys():
+        if key != "id":
+            prop_len += 1
+
+    out.write(pack("I", prop_len))
+    for key in obj.properties().keys():
+        # TODO handle string properties
+        if key == "id":
+            continue
+        out.write(pack("I", found[key]))
+        out.write(b"\0")
+        out.write(pack("I", int(obj.propertyAsString(key))))
+
+
+def write_object_group(out, m, name, kind, maximum):
     objs = find_object_group(m, name)
     if objs == None:
         raise Exception("No object group named \"" + name + "\" found.")
-    out.write_table_start("[\"" + kind + "\"]")
+    mapping = collect_object_mapping(objs)
+    props_mapping, props_found = collect_properties_mapping(objs)
+    if objs.objectCount() > maximum:
+        raise Exception("You can only place " + str(maximum) +
+                        " items in layer " + name + ".")
+
+    out.write(str.encode(kind))
+    out.write(b"\0")
+
+    write_mapping(out, mapping)
+    write_props_mapping(out, props_mapping)
+
+    out.write(pack("I", objs.objectCount()))
+
     for i in range(objs.objectCount()):
         obj = objs.objectAt(i)
-        out.write_bare_table_start()
 
-        out.write_key_and_value("id", obj.propertyAsString("id"))
-        out.write_key_and_unquoted_value("x", str(int(obj.x() / 48)))
-        out.write_key_and_unquoted_value("y", str(int(obj.y() / 48)))
+        x = int(obj.x() / 48)
+        y = int(obj.y() / 48)
+        if obj.height() == 96:
+            y += 1
+        out.write(pack("III", obj.cell().tile().id(), x, y))
 
-        found = False
-        for key in obj.properties().keys():
-            if key != "id":
-                found = True
-                break
+        write_properties(out, obj, props_found)
 
-        if found:
-            out.write_table_start("props")
-            for key in obj.properties().keys():
-                # TODO handle string properties
-                if key == "id":
-                    continue
-                out.write_key_and_unquoted_value(
-                    key, obj.propertyAsString(key))
-            out.write_table_end()
 
-        out.write_bare_table_end()
-    out.write_table_end()
+def write_mapping(out, mapping):
+    out.write(pack("I", len(mapping)))
+    for k, v in mapping.items():
+        out.write(pack("I", k))
+        out.write(str.encode(v))
+        out.write(b"\0")
+
+
+def write_props_mapping(out, mapping):
+    out.write(pack("I", len(mapping)))
+    for k, v in mapping.items():
+        out.write(str.encode(v))
+        out.write(b"\0")
+        out.write(pack("I", k))
 
 
 class ElonaFoobar(T.Plugin):
@@ -108,7 +163,7 @@ class ElonaFoobar(T.Plugin):
 
     @classmethod
     def nameFilter(cls):
-        return "Elona Foobar (*.lua)"
+        return "Elona Foobar (*.map)"
 
     @classmethod
     def supportsFile(cls, f):
@@ -126,30 +181,28 @@ class ElonaFoobar(T.Plugin):
         if mdata == None:
             raise Exception("No layer named \"Tiles\" found.")
 
-        with lua_table_writer.LuaTableWriter(fn) as out:
-            out.write_key_and_unquoted_value("width", str(m.width()))
-            out.write_key_and_unquoted_value("height", str(m.height()))
+        with gzip.open(splitext(fn)[0] + ".map", "wb") as out:
+            mapping = collect_mapping(mdata)
 
-            mapping, found = collect_mapping(mdata)
-            out.write_table_start("mapping")
-            for k, v in mapping.items():
-                out.write_key_and_value("[" + str(k) + "]", str(v))
-            out.write_table_end()
+            out.write(pack("II", m.width(), m.height()))
+            write_mapping(out, mapping)
+            tiles = encode_tiles(mdata)
+            out.write(tiles)
 
-            tiles = encode_tiles(mdata, found)
-            out.write_key_and_value("tiles", tiles)
+            prop_len = 0
+            for key in mdata.properties().keys():
+                prop_len += 1
+            out.write(pack("I", prop_len))
 
-            out.write_table_start("props")
             for key in mdata.properties().keys():
                 # TODO handle string properties
-                out.write_key_and_unquoted_value(
-                    key, mdata.propertyAsString(key))
-            out.write_table_end()
+                out.write(str.encode(key))
+                out.write(b"\0")
+                out.write(pack("I", int(mdata.propertyAsString(key))))
 
-            out.write_table_start("objects")
-            write_object_group(out, m, "Characters", "core.chara")
-            write_object_group(out, m, "Items", "core.item")
-            write_object_group(out, m, "Map Objects", "core.feat")
-            out.write_table_end()
+            write_object_group(out, m, "Characters", "core.chara", 188)
+            write_object_group(out, m, "Items", "core.item", 400)
+            write_object_group(out, m, "Map Objects",
+                               "core.feat", m.width() * m.height())
 
         return True

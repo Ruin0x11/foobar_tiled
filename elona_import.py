@@ -187,6 +187,7 @@ class Elona(T.Plugin):
                     map_object.setProperty("id", obj.id)
                     map_object.setProperty("param1", obj.param1)
                     map_object.setProperty("param2", obj.param2)
+                    map_object.setProperty("param3", obj.param3)
                     map_object.setCell(T.Tiled.Cell(ti))
                     o.addObject(map_object)
         return o
