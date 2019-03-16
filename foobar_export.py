@@ -110,6 +110,7 @@ def write_properties(out, obj, found):
     out.write(pack("I", prop_len))
     for key in obj.properties().keys():
         # TODO handle string properties
+        print(key)
         if key == "id":
             continue
         out.write(pack("I", found[key]))
@@ -118,7 +119,6 @@ def write_properties(out, obj, found):
 
 def read_object_group(fh):
     kind = read_string(fh)
-    print(kind)
     mapping = read_mapping(fh)
     props_mapping = read_mapping(fh)
     obj_count = unpack("I", fh.read(4))[0]
@@ -153,7 +153,6 @@ def write_object_group(out, m, name, kind, maximum):
     for i in range(objs.objectCount()):
         obj = objs.objectAt(i)
 
-        print("writeobj %d" % obj.cell().tile().id())
         x = int(obj.x() / 48)
         y = int(obj.y() / 48) - 1
         if obj.height() == 96:
@@ -170,12 +169,9 @@ def read_string(fh):
 def read_mapping(fh):
     mapping = dict()
     mapping_len = unpack("I", fh.read(4))[0]
-    print("mapping")
-    print(mapping_len)
     for i in range(mapping_len):
         k = unpack("I", fh.read(4))[0]
         v = read_string(fh)
-        print("read %d %s" % (k, v))
         mapping[k] = v
     return mapping
 
@@ -183,7 +179,6 @@ def read_mapping(fh):
 def write_mapping(out, mapping):
     out.write(pack("I", len(mapping)))
     for k, v in mapping.items():
-        print("write %d %s" % (k, v))
         out.write(pack("I", k))
         write_string(out, v)
 
@@ -193,34 +188,10 @@ def write_string(out, s):
     out.write(b"\0")
 
 
-def LengthOfFile(f):
-    """ Get the length of the file for a regular file (not a device file)"""
-    currentPos = f.tell()
-    f.seek(0, 2)          # move to end of file
-    length = f.tell()     # get current position
-    f.seek(currentPos, 0)  # go back to where we started
-    return length
-
-
-def BytesRemaining(f, f_len):
-    """ Get number of bytes left to read, where f_len is the length of the file (probably from f_len=LengthOfFile(f) )"""
-    currentPos = f.tell()
-    return f_len-currentPos
-
-
-def BytesRemainingAndSize(f):
-    """ Get number of bytes left to read for a regular file (not a device file), returns a tuple of the bytes remaining and the total length of the file
-        If your code is going to be doing this alot then use LengthOfFile and  BytesRemaining instead of this function
-    """
-    currentPos = f.tell()
-    l = LengthOfFile(f)
-    return l-currentPos, l
-
-
 class ElonaFoobar(T.Plugin):
     @classmethod
     def nameFilter(cls):
-        return "Elona Foobar (*.map)"
+        return "Elona Foobar (*.fmp)"
 
     @classmethod
     def supportsFile(cls, f):
@@ -270,8 +241,6 @@ class ElonaFoobar(T.Plugin):
     def __init__(self, f):
         self.mdata = dict()
         with gzip.open(f, "rb") as fh:
-            le = LengthOfFile(fh)
-            pprint(BytesRemaining(fh, le))
             fh.read(4)
             self.version = unpack("I", fh.read(4))[0]
 
@@ -279,19 +248,13 @@ class ElonaFoobar(T.Plugin):
             self.mods = list()
             for i in range(mod_count):
                 mod = read_string(fh)
-                print(mod)
 
             self.width, self.height = unpack("II", fh.read(2 * 4))
-            pprint(BytesRemaining(fh, le))
 
             mapping = read_mapping(fh)
-            pprint(mapping)
-            pprint(BytesRemaining(fh, le))
 
             self.tiles = list(
                 unpack("I" * (self.width * self.height), fh.read(self.width * self.height * 4)))
-            print(len(self.tiles))
-            pprint(BytesRemaining(fh, le))
 
             prop_len = unpack("I", fh.read(4))[0]
             self.mdata = dict()
@@ -301,14 +264,10 @@ class ElonaFoobar(T.Plugin):
                 self.mdata[key] = val
 
             count = unpack("I", fh.read(4))[0]
-            pprint(count)
 
             self.charas = read_object_group(fh)[1]
             self.items = read_object_group(fh)[1]
             self.objs = read_object_group(fh)[1]
-            pprint(self.charas)
-            pprint(self.items)
-            pprint(self.objs)
 
     def populate_tiles(self, t):
         l = T.Tiled.TileLayer(
@@ -367,7 +326,7 @@ class ElonaFoobar(T.Plugin):
 
         mods = ["core"]
 
-        with gzip.open(splitext(fn)[0] + ".map", "wb") as out:
+        with gzip.open(splitext(fn)[0] + ".fmp", "wb") as out:
             out.write(pack("4s", b"FOOM"))
 
             version = 1
@@ -399,6 +358,5 @@ class ElonaFoobar(T.Plugin):
             write_object_group(out, m, "Items", "core.item", 400)
             write_object_group(out, m, "Map Objects",
                                "core.feat", m.width() * m.height())
-            print(out.tell())
 
         return True
