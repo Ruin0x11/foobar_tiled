@@ -1,12 +1,13 @@
-from pprint import pprint
 """
 Elona 1.22 map importer.
 """
 
+from pprint import pprint
 import sys
 import re
 import tiled as T
-from os.path import dirname, splitext, basename, exists
+import os
+from os.path import dirname, splitext, basename, exists, realpath, join
 from lib import cpystruct
 from struct import pack, unpack
 from collections import namedtuple
@@ -18,14 +19,62 @@ def getfile(path, ext):
     return splitext(path)[0] + "." + ext
 
 
+def load_tileset(m, filename):
+    print("load " + filename)
+    if not exists(filename):
+        raise Exception("cannot find tileset file " + filename)
+    tileset = T.loadTileset(filename)
+    if tileset == None:
+        raise Exception("failed to load " + filename)
+    m.addTileset(tileset)
+
+
+def load_tilesets(m, atlas, directory):
+    tileset_directory = join(directory, "Elona_foobar")
+
+    tile_atlas = join(tileset_directory, "map%01i.tsx" % atlas)
+    load_tileset(m, tile_atlas)
+
+    for filename in os.listdir(tileset_directory):
+        if filename == "map0.tsx" or filename == "map1.tsx" or filename == "map2.tsx":
+            continue
+        if filename.endswith(".tsx"):
+            print("load " + filename)
+            atlas = join(tileset_directory, filename)
+            load_tileset(m, atlas)
+
+
+def find_tileset(m, data_type):
+    for i in range(m.tilesetCount()):
+        ts = m.tilesetAt(i).data()
+        if ts.name() == data_type:
+            return ts
+    return None
+
+
+def find_tile_by_legacy(tileset, legacy_id, cache):
+    if legacy_id in cache:
+        return tileset.tileAt(cache[legacy_id])
+    for i in range(tileset.tileCount()):
+        tile = tileset.tileAt(i)
+        if int(tile.propertyAsString("legacy_id")) == legacy_id:
+            cache[legacy_id] = tile.id()
+            return tile
+    return None
+
+
 class Elona(T.Plugin):
     @classmethod
+    def shortName(cls):
+        return "idx"
+
+    @classmethod
     def nameFilter(cls):
-        return "Elona 1.22 (*.map)"
+        return "Elona 1.22 (*.idx)"
 
     @classmethod
     def supportsFile(cls, f):
-        return exists(getfile(f, "idx"))
+        return exists(getfile(f, "map"))
 
     @classmethod
     def read(cls, f):
@@ -39,43 +88,25 @@ class Elona(T.Plugin):
         m.setProperty("next_regenerate_date", el.mdata.regen)
         m.setProperty("stair_up_pos", el.mdata.stairup)
 
-        root = '/home/ruin/Documents'
-        atlas = root + '/map%01i.tsx' % el.mdata.atlas
-        # atlas = utils.find_sensitive_path(dirname(f)+'/../graphic/map', atlas)
-        tileset = T.Tiled.Tileset.create("", 48, 48, 0, 0)
-        if not T.loadSharedTilesetFromTsx(tileset, atlas):
-            raise Exception("failed to load " + atlas)
+        base_directory = dirname(realpath(__file__))
+        load_tilesets(m, el.mdata.atlas, base_directory)
 
-        layer_tiles = el.populate_tiles(tileset.data())
-        layer_objects = el.populate_objects(tileset.data())
+        tileset = find_tileset(m, "core.map_chip")
+        item_tileset = find_tileset(m, "core.item")
+        chara_tileset = find_tileset(m, "core.chara")
 
-        item_atlas = '/tmp/item.tsx'
-        item_tileset = T.Tiled.Tileset.create("", 48, 48, 0, 0)
-        if not T.loadSharedTilesetFromTsx(item_tileset, item_atlas):
-            raise Exception("failed to load" + item_atlas)
+        layer_tiles = el.populate_tiles(tileset)
+        layer_objects = el.populate_objects(tileset)
+        layer_items = el.populate_items(item_tileset)
+        layer_charas = el.populate_characters(chara_tileset)
 
-        layer_items = el.populate_items(item_tileset.data())
-
-        chara_atlas = '/tmp/character.tsx'
-        chara_tileset = T.Tiled.Tileset.create("", 48, 48, 0, 0)
-        if not T.loadSharedTilesetFromTsx(chara_tileset, chara_atlas):
-            raise Exception("failed to load" + chara_atlas)
-
-        layer_charas = el.populate_characters(chara_tileset.data())
         # have to pass ownership so can't add tileset before populating layer
-        m.addTileset(tileset)
-        m.addTileset(item_tileset)
-        m.addTileset(chara_tileset)
         m.addLayer(layer_tiles)
         m.addLayer(layer_objects)
         m.addLayer(layer_items)
         m.addLayer(layer_charas)
 
         return m
-
-    @classmethod
-    def write(cls, m, fn):
-        return False
 
     cell_objs = {0: (21, 726),   # dummy
                  1: (21, 726),   # 扉99
@@ -94,12 +125,13 @@ class Elona(T.Plugin):
                  }
 
     def __init__(self, f):
+        map_ = getfile(f, "map")
         obj = getfile(f, "obj")
         idx = getfile(f, "idx")
         with gzip.open(idx, 'rb') as fh:
             mdata = MapData()
             mdata.unpack(fh)
-        with gzip.open(f, 'rb') as fh:
+        with gzip.open(map_, 'rb') as fh:
             tiles = fh.read(mdata.width * mdata.height * 4)
             tiles = unpack('I' * mdata.width * mdata.height, tiles)
         items = []
@@ -112,8 +144,11 @@ class Elona(T.Plugin):
             Object = namedtuple('Object', 'id x y param1 param2 param3')
 
             with gzip.open(obj, 'rb') as fh:
-                for i in range(300):
+                for i in range(400):
                     dat = fh.read(5 * 4)
+                    if len(dat) == 0:
+                        print("not reading past " + str(i) + " objects")
+                        break
                     dat = unpack("IIIII", dat)
                     if dat[0] != 0:
                         if dat[4] == 0:
@@ -134,23 +169,24 @@ class Elona(T.Plugin):
         self.objs = objs
 
     def populate_tiles(self, t):
+        cache = dict()
         l = T.Tiled.TileLayer(
             'Tiles', 0, 0, self.mdata.width, self.mdata.height)
         for y in range(self.mdata.height):
             for x in range(self.mdata.width):
                 tpos = self.tiles[y * self.mdata.width + x]
-                if tpos < t.tileCount():
-                    ti = t.tileAt(tpos)
-                    if ti != None:
-                        l.setCell(x, y, T.Tiled.Cell(ti))
+                ti = find_tile_by_legacy(t, tpos, cache)
+                if ti != None:
+                    l.setCell(x, y, T.Tiled.Cell(ti))
 
         return l
 
     def populate_items(self, t):
+        cache = dict()
         o = T.Tiled.ObjectGroup('Items', 0, 0)
         for item in self.items:
             if item.id < t.tileCount():
-                ti = t.tileAt(item.id)
+                ti = find_tile_by_legacy(t, item.id, cache)
                 if ti != None:
                     map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
                         item.x * 48, item.y * 48 + 48), T.qt.QSizeF(ti.width(), ti.height()))
@@ -161,10 +197,11 @@ class Elona(T.Plugin):
         return o
 
     def populate_characters(self, t):
+        cache = dict()
         o = T.Tiled.ObjectGroup('Characters', 0, 0)
         for chara in self.charas:
             if chara.id < t.tileCount():
-                ti = t.tileAt(chara.id)
+                ti = find_tile_by_legacy(t, chara.id, cache)
                 if ti != None:
                     map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
                         chara.x * 48, chara.y * 48 + 48), T.qt.QSizeF(ti.width(), ti.height()))
@@ -174,10 +211,11 @@ class Elona(T.Plugin):
         return o
 
     def populate_objects(self, t):
+        cache = dict()
         o = T.Tiled.ObjectGroup('Map Objects', 0, 0)
         for obj in self.objs:
             if obj.id < t.tileCount():
-                ti = t.tileAt(obj.id)
+                ti = find_tile_by_legacy(t, obj.id, cache)
                 if ti != None:
                     map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
                         obj.x * 48, obj.y * 48 + 48), T.qt.QSizeF(48, 48))

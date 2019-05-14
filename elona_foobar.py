@@ -1,12 +1,13 @@
-from pprint import pprint
 """
 Elona Foobar map importer/exporter.
 """
 
+from pprint import pprint
 import sys
 import re
 import tiled as T
-from os.path import dirname, splitext, basename, exists
+import os
+from os.path import dirname, splitext, basename, exists, join, realpath
 from lib import cpystruct
 from struct import pack, unpack
 from collections import namedtuple
@@ -22,163 +23,12 @@ def represents_int(s):
         return False
 
 
-def find_layer(m, name):
-    for i in range(m.layerCount()):
-        if T.isTileLayerAt(m, i):
-            l = T.tileLayerAt(m, i)
-            if l.name() == name:
-                return l
-    return None
-
-
-def find_object_group(m, name):
-    for i in range(m.objectGroupCount() + 1):
-        if T.isObjectGroupAt(m, i):
-            o = T.objectGroupAt(m, i)
-            if o.name() == name:
-                return o
-    return None
-
-
-def find_tile(m, id):
-    for i in range(m.tilesetCount()):
-        if m.isTilesetUsed(i):
-            ti = m.tilesetAt(i)
-            for j in range(ti.tileCount()):
-                tile = ti.tileAt(j)
-                if tile.id() == id:
-                    return tile.propertyAsString("id")
-    return None
-
-
-def collect_mapping(mdata):
-    mapping = dict()
-    for y in range(mdata.height()):
-        for x in range(mdata.width()):
-            tile = mdata.cellAt(x, y).tile()
-            if not tile.id() in mapping:
-                mapping[tile.id()] = tile.propertyAsString("id")
-    return mapping
-
-
-def collect_object_mapping(objs):
-    found = dict()
-    mapping = dict()
-    for i in range(objs.objectCount()):
-        o = objs.objectAt(i)
-        tile = o.cell().tile()
-        id = tile.id()
-        if not id in mapping:
-            mapping[id] = tile.propertyAsString("id")
-    return mapping
-
-
-def collect_properties_mapping(objs):
-    i = 0
-    found = dict()
-    mapping = dict()
-    for i in range(objs.objectCount()):
-        o = objs.objectAt(i)
-        for key in o.properties().keys():
-            if not key in found:
-                found[key] = i
-                mapping[i] = key
-                i += 1
-    return (mapping, found)
-
-
-def encode_tiles(mdata):
-    tiles = bytearray()
-    for y in range(mdata.height()):
-        for x in range(mdata.width()):
-            tile = mdata.cellAt(x, y).tile()
-            id = tile.id()
-            tiles.extend(pack("I", id))
-    return tiles
-
-
-def read_properties(fh, mapping):
-    props = dict()
-    mapping_len = unpack("I", fh.read(4))[0]
-
-    for i in range(mapping_len):
-        idx = unpack("I", fh.read(4))[0]
-        key = mapping[idx]
-        val = read_typed_value(fh)
-        props[key] = val
-
-    return props
-
-
-def write_properties(out, obj, found):
-    prop_len = 0
-    for key in obj.properties().keys():
-        if key != "id":
-            prop_len += 1
-
-    out.write(pack("I", prop_len))
-    for key in obj.properties().keys():
-        if key == "id":
-            continue
-
-        out.write(pack("I", found[key]))
-
-        prop = obj.propertyAsString(key)
-        if represents_int(prop):
-            out.write(pack("b", 0))
-            out.write(pack("I", int(prop)))
-        else:
-            out.write(pack("b", 1))
-            write_string(out, prop)
-
-
-def read_object_group(fh):
-    kind = read_string(fh)
-    mapping = read_mapping(fh)
-    props_mapping = read_mapping(fh)
-    obj_count = unpack("I", fh.read(4))[0]
-    objs = []
-
-    Object = namedtuple("Object", "id x y props")
-    for i in range(obj_count):
-        id, x, y = unpack("III", fh.read(4 * 3))
-        props = read_properties(fh, props_mapping)
-        objs.append(Object(id=id, x=x, y=y, props=props))
-
-    return (kind, objs)
-
-
-def write_object_group(out, m, name, kind, maximum):
-    objs = find_object_group(m, name)
-    if objs == None:
-        raise Exception("No object group named \"" + name + "\" found.")
-    mapping = collect_object_mapping(objs)
-    props_mapping, props_found = collect_properties_mapping(objs)
-    if objs.objectCount() > maximum:
-        raise Exception("You can only place " + str(maximum) +
-                        " items in layer " + name + ".")
-
-    write_string(out, kind)
-
-    write_mapping(out, mapping)
-    write_mapping(out, props_mapping)
-
-    out.write(pack("I", objs.objectCount()))
-
-    for i in range(objs.objectCount()):
-        obj = objs.objectAt(i)
-
-        x = floor(obj.x() / 48.0)
-        y = floor(obj.y() / 48.0)
-        if obj.height() == 96:
-            y += 1
-        out.write(pack("III", obj.cell().tile().id(), x, y))
-
-        write_properties(out, obj, props_found)
-
-
-def read_string(fh):
-    return "".join(iter(lambda: fh.read(1).decode("ascii"), "\x00"))
+def represents_bool(s):
+    try:
+        bool(s)
+        return True
+    except ValueError:
+        return False
 
 
 def read_typed_value(fh):
@@ -186,25 +36,28 @@ def read_typed_value(fh):
     if ty == 0:
         val = unpack("I", fh.read(4))[0]
     elif ty == 1:
+        val = unpack("b", fh.read(1))[0] == 1
+    elif ty == 2:
         val = read_string(fh)
+    else:
+        raise Exception("unknown typed value " + str(ty))
     return val
 
 
-def read_mapping(fh):
-    mapping = dict()
-    mapping_len = unpack("I", fh.read(4))[0]
-    for i in range(mapping_len):
-        k = unpack("I", fh.read(4))[0]
-        v = read_string(fh)
-        mapping[k] = v
-    return mapping
+def write_typed_value(out, prop):
+    if represents_int(prop):
+        out.write(pack("b", 0))
+        out.write(pack("I", int(prop)))
+    elif represents_bool(prop):
+        out.write(pack("b", 1))
+        out.write(pack("b", bool(prop)))
+    else:
+        out.write(pack("b", 2))
+        write_string(out, prop)
 
 
-def write_mapping(out, mapping):
-    out.write(pack("I", len(mapping)))
-    for k, v in mapping.items():
-        out.write(pack("I", k))
-        write_string(out, v)
+def read_string(fh):
+    return "".join(iter(lambda: fh.read(1).decode("ascii"), "\x00"))
 
 
 def write_string(out, s):
@@ -212,185 +65,522 @@ def write_string(out, s):
     out.write(b"\0")
 
 
+def load_tileset(m, filename):
+    print("load " + filename)
+    if not exists(filename):
+        raise Exception("cannot find tileset file " + filename)
+    tileset = T.loadTileset(filename)
+    if tileset == None:
+        raise Exception("failed to load " + filename)
+    m.addTileset(tileset)
+
+
+def load_tilesets(m, atlas, directory):
+    tileset_directory = join(directory, "Elona_foobar")
+
+    tile_atlas = join(tileset_directory, "map%01i.tsx" % atlas)
+    load_tileset(m, tile_atlas)
+
+    for filename in os.listdir(tileset_directory):
+        if filename == "map0.tsx" or filename == "map1.tsx" or filename == "map2.tsx":
+            continue
+        if filename.endswith(".tsx"):
+            print("load " + filename)
+            atlas = join(tileset_directory, filename)
+            load_tileset(m, atlas)
+
+
 class ElonaFoobar(T.Plugin):
+    @classmethod
+    def shortName(cls):
+        return "fmp"
+
     @classmethod
     def nameFilter(cls):
         return "Elona Foobar (*.fmp)"
 
     @classmethod
     def supportsFile(cls, f):
-        return open(f, "rb").read(4) == b"FMP "
+        with gzip.open(f, "rb") as fh:
+            return fh.read(4) == b"FMP "
 
     @classmethod
-    def read(cls, f):
-        foo = ElonaFoobar(f)
-
-        m = T.Tiled.Map(T.Tiled.Map.Orthogonal, foo.width, foo.height, 48, 48)
-
+    def init_map(cls, foo, m):
         for k, v in foo.mdata.items():
             m.setProperty(k, v)
 
-        root = '/home/ruin/Documents'
-        atlas = root + '/map%01i.tsx' % foo.mdata["atlas"]
-        tileset = T.Tiled.Tileset.create("", 48, 48, 0, 0)
-        if not T.loadSharedTilesetFromTsx(tileset, atlas):
-            raise Exception("failed to load " + atlas)
+        base_directory = dirname(realpath(__file__))
+        load_tilesets(m, foo.mdata["atlas"], base_directory)
 
-        layer_tiles = foo.populate_tiles(tileset.data())
-        layer_objects = foo.populate_objects(tileset.data())
+        tile_layer = T.Tiled.TileLayer(
+            "Tiles", 0, 0, foo.width, foo.height)
 
-        item_atlas = '/tmp/item.tsx'
-        item_tileset = T.Tiled.Tileset.create("", 48, 48, 0, 0)
-        if not T.loadSharedTilesetFromTsx(item_tileset, item_atlas):
-            raise Exception("failed to load" + item_atlas)
+        load_tiles(m, tile_layer, foo.tiles)
+        m.addLayer(tile_layer)
 
-        layer_items = foo.populate_map_objects(
-            item_tileset.data(), foo.items, "Items")
+        for layer in foo.layers:
+            if layer["kind"] == 0:  # tile layer
+                pass
+            elif layer["kind"] == 1:  # object group
+                new_layer = T.Tiled.ObjectGroup(layer["name"], 0, 0)
+                load_objects(m, new_layer, layer["objs"])
+                m.addLayer(new_layer)
+            elif layer["kind"] == 2:  # group layer
+                new_layer = T.Tiled.GroupLayer(layer["name"], 0, 0)
+                m.addLayer(new_layer)
+            elif layer["kind"] == 3:  # image layer
+                pass
 
-        chara_atlas = '/tmp/character.tsx'
-        chara_tileset = T.Tiled.Tileset.create("", 48, 48, 0, 0)
-        if not T.loadSharedTilesetFromTsx(chara_tileset, chara_atlas):
-            raise Exception("failed to load" + chara_atlas)
+    @classmethod
+    def read(cls, f):
+        # Read map binary data.
+        foo = ElonaFoobar(f)
 
-        layer_charas = foo.populate_map_objects(
-            chara_tileset.data(), foo.charas, "Characters")
+        # Instantiate Tiled map from binary data.
+        m = T.Tiled.Map(T.Tiled.Map.Orthogonal, foo.width, foo.height, 48, 48)
 
-        m.addTileset(tileset)
-        m.addTileset(item_tileset)
-        m.addTileset(chara_tileset)
-        m.addLayer(layer_tiles)
-        m.addLayer(layer_objects)
-        m.addLayer(layer_items)
-        m.addLayer(layer_charas)
+        # Load layers and properties into Tiled.
+        ElonaFoobar.init_map(foo, m)
 
         return m
 
     def __init__(self, f):
+        if isinstance(f, dict):
+            self.version = 1
+
+            self.mods = set()
+
+            self.mdata = f
+
+            self.width = self.mdata["width"]
+            self.height = self.mdata["height"]
+
+            self.tiles = [
+                "core." + str(self.mdata["atlas"]) + "_0"] * self.width * self.height
+
+            self.layers = list()
+
+            return
+
         self.mdata = dict()
         with gzip.open(f, "rb") as fh:
             fh.read(4)
+
             self.version = unpack("I", fh.read(4))[0]
+            print("version " + str(self.version))
 
             mod_count = unpack("I", fh.read(4))[0]
-            self.mods = list()
+            print("mod count " + str(mod_count))
+            self.mods = set()
             for i in range(mod_count):
-                mod = read_string(fh)
+                self.mods.add(read_string(fh))
 
-            prop_len = unpack("I", fh.read(4))[0]
-            self.mdata = dict()
-            for i in range(prop_len):
-                key = read_string(fh)
-                val = read_typed_value(fh)
-                self.mdata[key] = val
+            ids_to_names = read_dict(fh)
 
-            mapping = read_mapping(fh)
+            self.mdata = read_properties(fh, ids_to_names)
 
             self.width, self.height = unpack("II", fh.read(2 * 4))
 
-            self.tiles = list(
-                unpack("I" * (self.width * self.height), fh.read(self.width * self.height * 4)))
+            self.tiles = read_tiles(fh, self.width, self.height, ids_to_names)
 
-            count = unpack("I", fh.read(4))[0]
+            self.layers = list()
+            layer_count = unpack("I", fh.read(4))[0]
 
-            self.charas = read_object_group(fh)[1]
-            self.items = read_object_group(fh)[1]
-            self.objs = read_object_group(fh)[1]
-
-    def populate_tiles(self, t):
-        l = T.Tiled.TileLayer(
-            'Tiles', 0, 0, self.width, self.height)
-        for y in range(self.height):
-            for x in range(self.width):
-                tpos = self.tiles[y * self.width + x]
-                if tpos < t.tileCount():
-                    ti = t.tileAt(tpos)
-                    if ti != None:
-                        l.setCell(x, y, T.Tiled.Cell(ti))
-
-        return l
-
-    def populate_map_objects(self, t, objs, name):
-        o = T.Tiled.ObjectGroup(name, 0, 0)
-        for obj in objs:
-            if obj.id < t.tileCount():
-                ti = t.tileAt(obj.id)
-                if ti != None:
-                    offset_y = 0
-                    if ti.height() == 96:
-                        offset_y = -48
-                    map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
-                        obj.x * 48, obj.y * 48 + offset_y), T.qt.QSizeF(ti.width(), ti.height()))
-                    # TODO
-                    # map_object.setProperty("id", ti.propertyAsString("id"))
-                    for k, v in obj.props.items():
-                        map_object.setProperty(k, v)
-                    map_object.setCell(T.Tiled.Cell(ti))
-                    o.addObject(map_object)
-        return o
-
-    def populate_objects(self, t):
-        o = T.Tiled.ObjectGroup('Map Objects', 0, 0)
-        for obj in self.objs:
-            if obj.id < t.tileCount():
-                ti = t.tileAt(obj.id)
-                if ti != None:
-                    map_object = T.Tiled.MapObject("", "", T.qt.QPointF(
-                        obj.x * 48, obj.y * 48), T.qt.QSizeF(48, 48))
-                    for k, v in obj.props.items():
-                        map_object.setProperty(k, v)
-                    # TODO
-                    # map_object.setProperty("id", obj.id)
-                    map_object.setCell(T.Tiled.Cell(ti))
-                    o.addObject(map_object)
-        return o
+            for i in range(layer_count):
+                self.layers.append(read_layer(fh, ids_to_names))
 
     @classmethod
-    def write(cls, m, fn):
-        mdata = find_layer(m, "Tiles")
-        cache = dict()
-        if mdata == None:
-            raise Exception("No layer named \"Tiles\" found.")
+    def write(cls, m, filename):
+        if m.infinite():
+            raise Exception("Infinite maps are not supported.")
+        if m.orientation() != T.Tiled.Map.Orthogonal:
+            raise Exception("Non-orthogonal maps are not supported.")
 
-        mods = ["core"]
+        is_new_map = m.tilesetCount() == 0
+        if is_new_map:
+            mdata = {
+                "width": m.width(),
+                "height": m.height(),
+                "atlas": 1,
+                "regen": 0,
+                "stairup": 0,
+            }
+            foo = ElonaFoobar(mdata)
+            ElonaFoobar.init_map(foo, m)
 
-        with gzip.open(splitext(fn)[0] + ".fmp", "wb") as out:
+        with gzip.open(splitext(filename)[0] + ".fmp", "wb") as out:
             out.write(pack("4s", b"FMP "))
 
+            # Map version.
             version = 1
             out.write(pack("I", version))
 
+            # Mod name/version.
+            mods = collect_mods_used(m)
             out.write(pack("I", len(mods)))
             for mod in mods:
                 write_string(out, mod)
 
-            prop_len = 0
-            for key in m.properties().keys():
-                prop_len += 1
-            out.write(pack("I", prop_len))
+            # Int -> String.
+            property_names = collect_property_names(m)
+            write_dict(out, property_names)
 
-            for key in m.properties().keys():
-                write_string(out, key)
-
-                prop = m.propertyAsString(key)
-                if represents_int(prop):
-                    out.write(pack("b", 0))
-                    out.write(pack("I", int(prop)))
-                else:
-                    out.write(pack("b", 1))
-                    write_string(out, prop)
-
-            mapping = collect_mapping(mdata)
-            write_mapping(out, mapping)
+            write_properties(out, m, property_names)
 
             out.write(pack("II", m.width(), m.height()))
 
-            tiles = encode_tiles(mdata)
-            out.write(tiles)
+            write_tiles(out, m, property_names)
 
-            out.write(pack("I", 3))
-            write_object_group(out, m, "Characters", "core.chara", 188)
-            write_object_group(out, m, "Items", "core.item", 400)
-            write_object_group(out, m, "Map Objects",
-                               "core.feat", m.width() * m.height())
+            out.write(pack("I", m.layerCount()))
+
+            for i in range(m.layerCount()):
+                l = m.layerAt(i)
+                write_layer(out, m, l, i, property_names)
 
         return True
+
+
+def collect_mods_used(m):
+    mods = set()
+
+    for i in range(m.layerCount()):
+        l = m.layerAt(i)
+
+        # tiles
+        if l.isTileLayer():
+            mdata = l.asTileLayer()
+            print("tile layer " + l.name() + " " + str(mdata.isEmpty()))
+            print(str(mdata.width()) + " " + str(mdata.height()))
+            for y in range(mdata.height()):
+                for x in range(mdata.width()):
+                    tile = mdata.cellAt(x, y).tile()
+
+                    if tile != None:
+                        data_id = tile.propertyAsString("data_id")
+                        mod, name = data_id.split(".")
+                        if not mod in mods:
+                            mods.add(mod)
+
+        # objects
+        elif l.isObjectGroup():
+            objs = l.asObjectGroup()
+            for i in range(objs.objectCount()):
+                o = objs.objectAt(i)
+
+                data_id = o.effectiveType()
+                mod, name = data_id.split(".")
+                if not mod in mods:
+                    mods.add(mod)
+
+                data_id = o.cell().tile().propertyAsString("data_id")
+                print(data_id)
+                mod, name = data_id.split(".")
+                if not mod in mods:
+                    mods.add(mod)
+
+    return mods
+
+
+class Mapping():
+    def __init__(self):
+        self.i = 0
+        self.names_to_ids = dict()
+
+    def add(self, key):
+        if not key in self.names_to_ids:
+            print("get key " + key)
+            self.names_to_ids[key] = self.i
+            self.i += 1
+
+
+def collect_property_names(m):
+    print("collect property names")
+    mapping = Mapping()
+
+    # map
+    for key in m.properties().keys():
+        mapping.add(key)
+
+    # layers
+    for i in range(m.layerCount()):
+        l = m.layerAt(i)
+
+        # tiles
+        if l.isTileLayer():
+            mdata = l.asTileLayer()
+            print("collect tile " + mdata.name() + " " + str(mdata.isEmpty()))
+            print(str(mdata.width()) + " " + str(mdata.height()))
+            for y in range(mdata.height()):
+                for x in range(mdata.width()):
+                    # tile property names
+                    tile = mdata.cellAt(x, y).tile()
+                    if tile != None:
+                        mapping.add(tile.propertyAsString("data_id"))
+                        for key in tile.properties().keys():
+                            mapping.add(key)
+
+        # objects
+        elif l.isObjectGroup():
+            objs = l.asObjectGroup()
+            for i in range(objs.objectCount()):
+                o = objs.objectAt(i)
+
+                mapping.add(o.name())
+                mapping.add(o.effectiveType())
+
+                mapping.add(o.cell().tile().propertyAsString("data_id"))
+                for key in o.properties().keys():
+                    mapping.add(key)
+
+        for key in l.properties().keys():
+            mapping.add(key)
+
+    pprint(mapping.names_to_ids)
+    return mapping.names_to_ids
+
+
+def read_dict(fh):
+    ids_to_names = dict()
+    key_count = unpack("I", fh.read(4))[0]
+    print("dict " + str(key_count))
+    for i in range(key_count):
+        key = read_string(fh)
+        value = unpack("I", fh.read(4))[0]
+        ids_to_names[value] = key
+
+    pprint(ids_to_names)
+    return ids_to_names
+
+
+def write_dict(out, d):
+    print("WRITE dict")
+    pprint(d)
+    out.write(pack("I", len(d.keys())))
+    for key in d.keys():
+        write_string(out, key)
+        assert(isinstance(d[key], int))
+        out.write(pack("I", d[key]))
+
+
+def read_properties(fh, ids_to_names):
+    print("props")
+    props = dict()
+    key_count = unpack("I", fh.read(4))[0]
+
+    for i in range(key_count):
+        key_id = unpack("I", fh.read(4))[0]
+        key = ids_to_names[key_id]
+        val = read_typed_value(fh)
+        props[key] = val
+
+    pprint(props)
+    return props
+
+
+def write_properties(out, m, names_to_ids):
+    out.write(pack("I", len(list(m.properties().keys()))))
+    for key in m.properties().keys():
+        out.write(pack("I", names_to_ids[key]))
+
+        prop = m.propertyAsString(key)
+        write_typed_value(out, prop)
+
+
+def read_tiles(fh, width, height, ids_to_names):
+    raw_tiles = list(
+        unpack("I" * (width * height), fh.read(width * height * 4)))
+    return list(map(lambda tile_id: ids_to_names[tile_id], raw_tiles))
+
+
+def write_tiles(out, m, names_to_ids):
+    for i in range(m.layerCount()):
+        if T.isTileLayerAt(m, i):
+            mdata = T.tileLayerAt(m, i)
+
+            for y in range(mdata.height()):
+                for x in range(mdata.width()):
+                    tile = mdata.cellAt(x, y).tile()
+                    if tile != None:
+                        data_id = tile.propertyAsString("data_id")
+                        out.write(pack("I", names_to_ids[data_id]))
+
+
+def write_layer(out, m, layer, layer_id, names_to_ids):
+    if layer.isTileLayer():
+        kind = 0
+    elif layer.isObjectGroup():
+        kind = 1
+    elif layer.isGroupLayer():
+        kind = 2
+    elif layer.isImageLayer():
+        kind = 3
+
+    out.write(pack("II", layer_id, kind))
+    write_string(out, layer.name())
+    write_properties(out, layer, names_to_ids)
+
+    if layer.isTileLayer():
+        pass
+    elif layer.isObjectGroup():
+        objs = layer.asObjectGroup()
+        out.write(pack("I", objs.objectCount()))
+        for i in range(objs.objectCount()):
+            o = objs.objectAt(i)
+            write_object(out, o, names_to_ids)
+    elif layer.isGroupLayer():
+        group = layer.asGroupLayer()
+        out.write(pack("I", group.layerCount()))
+        for i in range(group.layerCount()):
+            found = False
+            for j in range(m.layerCount()):
+                if m.layerAt(j) == group.layerAt(i):
+                    out.write(pack("I", j))
+                    found = True
+                    break
+            assert(found)
+    elif layer.isImageLayer():
+        pass
+    else:
+        raise Exception("unknown layer kind")
+
+
+def read_layer(fh, ids_to_names):
+    layer_id, kind = unpack("II", fh.read(2 * 4))
+    name = read_string(fh)
+    props = read_properties(fh, ids_to_names)
+    objs = list()
+    group = list()
+
+    if kind == 0:
+        # tile layer
+        pass
+    elif kind == 1:
+        # object group
+        obj_count = unpack("I", fh.read(4))[0]
+        for i in range(obj_count):
+            print("obj")
+            o = read_object(fh, ids_to_names)
+            pprint(o)
+            objs.append(o)
+    elif kind == 2:
+        # group layer
+        layer_count = unpack("I", fh.read(4))[0]
+        for i in range(layer_count):
+            group.add(unpack("I", fh.read(4))[0])
+    elif kind == 3:
+        # image layer
+        pass
+    else:
+        raise Exception("unknown layer kind " + str(kind))
+
+    return {
+        "id": layer_id,
+        "kind": kind,
+        "name": name,
+        "props": props,
+        "objs": objs,
+        "group": group,
+    }
+
+
+def read_object(fh, ids_to_names):
+    data_id_id, data_type_id, name_id, x, y = unpack("IIIII", fh.read(4 * 5))
+    data_id = ids_to_names[data_id_id]
+    data_type = ids_to_names[data_type_id]
+    name = ids_to_names[name_id]
+    props = read_properties(fh, ids_to_names)
+
+    return {
+        "data_id": data_id,
+        "data_type": data_type,
+        "name": name,
+        "x": x,
+        "y": y,
+        "props": props,
+    }
+
+
+def write_object(out, obj, names_to_ids):
+    tile = obj.cell().tile()
+    data_id = tile.propertyAsString("data_id")
+    data_type = obj.effectiveType()
+    name = obj.name()
+    x = floor(obj.x() / 48.0)
+    y = floor(obj.y() / 48.0)
+    if obj.height() == 96:
+        y += 1
+
+    out.write(pack("IIIII", names_to_ids[data_id],
+                   names_to_ids[data_type], names_to_ids[name], x, y))
+
+    write_properties(out, obj, names_to_ids)
+
+
+def find_tileset(m, data_type):
+    for i in range(m.tilesetCount()):
+        ts = m.tilesetAt(i).data()
+        if ts.name() == data_type:
+            return ts
+    return None
+
+
+def find_object_tile(tileset, data_id, cache):
+    if data_id in cache:
+        return tileset.tileAt(cache[data_id])
+    for i in range(tileset.tileCount()):
+        tile = tileset.tileAt(i)
+        if tile.propertyAsString("data_id") == data_id:
+            cache[data_id] = tile.id()
+            return tile
+    return None
+
+
+def load_tiles(m, tile_layer, tiles):
+    cache = dict()
+    tileset = find_tileset(m, "core.map_chip")
+    if tileset == None:
+        raise Exception("No tileset loaded that has core.map_chip")
+
+    for y in range(m.height()):
+        for x in range(m.width()):
+            data_id = tiles[y * m.width() + x]
+            tile = find_object_tile(tileset, data_id, cache)
+            if tile == None:
+                raise Exception("Could not find tile " + data_id)
+            tile_layer.setCell(x, y, T.Tiled.Cell(tile))
+
+
+def load_objects(m, object_group, d):
+    cache = dict()
+    tileset_cache = dict()
+
+    for obj in d:
+        data_type = obj["data_type"]
+        if data_type in tileset_cache:
+            tileset = tileset_cache[data_type]
+        else:
+            tileset = find_tileset(m, data_type)
+            tileset_cache[data_type] = tileset
+        data_id = obj["data_id"]
+        name = obj["name"]
+        tile = find_object_tile(tileset, data_id, cache)
+        if tile == None:
+            raise Exception("No tileset loaded that has " +
+                            data_type + "#" + data_id)
+
+        x = obj["x"]
+        y = obj["y"]
+        width = tile.width()
+        height = tile.height()
+        if height == 96:
+            y -= 1
+
+        map_object = T.Tiled.MapObject(name, data_type, T.qt.QPointF(
+            x * 48, y * 48), T.qt.QSizeF(width, height))
+        for k, v in obj["props"].items():
+            map_object.setProperty(k, v)
+        # TODO
+        # map_object.setProperty("id", obj.id)
+        map_object.setType(data_type)
+        map_object.setCell(T.Tiled.Cell(tile))
+        object_group.addObject(map_object)
