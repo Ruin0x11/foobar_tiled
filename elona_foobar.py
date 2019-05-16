@@ -44,11 +44,11 @@ def read_typed_value(fh):
     return val
 
 
-def write_typed_value(out, prop):
-    if represents_int(prop):
+def write_typed_value(out, prop, prop_type):
+    if prop_type == "int":
         out.write(pack("b", 0))
         out.write(pack("I", int(prop)))
-    elif represents_bool(prop):
+    elif prop_type == "bool":
         out.write(pack("b", 1))
         out.write(pack("b", bool(prop)))
     else:
@@ -190,11 +190,20 @@ class ElonaFoobar(T.Plugin):
                 self.layers.append(read_layer(fh, ids_to_names))
 
     @classmethod
+    def validate(cls, m):
+        # TODO: validate correct atlas tiles are used
+        # TODO: validate map_chips are not used in object layer
+        # TODO: validate objects are not used in tile layer
+        return True
+
+    @classmethod
     def write(cls, m, filename):
-        if m.infinite():
-            raise Exception("Infinite maps are not supported.")
-        if m.orientation() != T.Tiled.Map.Orthogonal:
-            raise Exception("Non-orthogonal maps are not supported.")
+        m.setInfinite(False)
+        m.setOrientation(T.Tiled.Map.Orthogonal)
+        m.setRenderOrder(T.Tiled.Map.RightDown)
+
+        if not ElonaFoobar.validate(m):
+            return False
 
         is_new_map = m.tilesetCount() == 0
         if is_new_map:
@@ -328,8 +337,12 @@ def collect_property_names(m):
                 mapping.add(o.name())
                 mapping.add(o.effectiveType())
 
-                mapping.add(o.cell().tile().propertyAsString("data_id"))
                 for key in o.properties().keys():
+                    mapping.add(key)
+
+                mapping.add(o.cell().tile().propertyAsString("data_id"))
+
+                for key in o.cell().tile().properties().keys():
                     mapping.add(key)
 
         for key in l.properties().keys():
@@ -383,7 +396,8 @@ def write_properties(out, m, names_to_ids):
         out.write(pack("I", names_to_ids[key]))
 
         prop = m.propertyAsString(key)
-        write_typed_value(out, prop)
+        prop_type = m.propertyType(key)
+        write_typed_value(out, prop, prop_type)
 
 
 def read_tiles(fh, width, height, ids_to_names):
@@ -489,6 +503,7 @@ def read_object(fh, ids_to_names):
     data_type = ids_to_names[data_type_id]
     name = ids_to_names[name_id]
     props = read_properties(fh, ids_to_names)
+    tile_props = read_properties(fh, ids_to_names)
 
     return {
         "data_id": data_id,
@@ -497,6 +512,7 @@ def read_object(fh, ids_to_names):
         "x": x,
         "y": y,
         "props": props,
+        "tile_props": tile_props,
     }
 
 
@@ -506,7 +522,7 @@ def write_object(out, obj, names_to_ids):
     data_type = obj.effectiveType()
     name = obj.name()
     x = floor(obj.x() / 48.0)
-    y = floor(obj.y() / 48.0)
+    y = floor(obj.y() / 48.0) - 1
     if obj.height() == 96:
         y += 1
 
@@ -514,6 +530,10 @@ def write_object(out, obj, names_to_ids):
                    names_to_ids[data_type], names_to_ids[name], x, y))
 
     write_properties(out, obj, names_to_ids)
+
+    # The properties of the object need to be combined with the
+    # implicit properties of the tile.
+    write_properties(out, obj.cell().tile(), names_to_ids)
 
 
 def find_tileset(m, data_type):
@@ -561,6 +581,8 @@ def load_objects(m, object_group, d):
         else:
             tileset = find_tileset(m, data_type)
             tileset_cache[data_type] = tileset
+        if tileset == None:
+            raise Exception("No tileset loaded that has " + data_type)
         data_id = obj["data_id"]
         name = obj["name"]
         tile = find_object_tile(tileset, data_id, cache)
@@ -569,7 +591,7 @@ def load_objects(m, object_group, d):
                             data_type + "#" + data_id)
 
         x = obj["x"]
-        y = obj["y"]
+        y = obj["y"] + 1
         width = tile.width()
         height = tile.height()
         if height == 96:
