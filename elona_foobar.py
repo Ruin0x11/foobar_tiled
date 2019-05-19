@@ -185,15 +185,65 @@ class ElonaFoobar(T.Plugin):
 
             self.layers = list()
             layer_count = unpack("I", fh.read(4))[0]
+            print("LAYER COUNT {}".format(layer_count))
 
             for i in range(layer_count):
                 self.layers.append(read_layer(fh, ids_to_names))
 
     @classmethod
+    def tile_layer_is_used(cls, tiles):
+        for y in range(tiles.height()):
+            for x in range(tiles.width()):
+                tile = tiles.cellAt(x, y).tile()
+                if tile != None:
+                    return True
+        return False
+
+    @classmethod
     def validate(cls, m):
-        # TODO: validate correct atlas tiles are used
-        # TODO: validate map_chips are not used in object layer
-        # TODO: validate objects are not used in tile layer
+        map_atlas = m.propertyAsString("atlas")
+
+        tile_layer_count = 0
+        for i in range(m.layerCount()):
+            l = m.layerAt(i)
+
+            if l.isTileLayer():
+                tiles = l.asTileLayer()
+                if ElonaFoobar.tile_layer_is_used(tiles):
+                    tile_layer_count += 1
+
+        if tile_layer_count != 1:
+            raise Exception(
+                "There must be exactly 1 non-empty tile layer used, but there were '{}' found.".format(tile_layer_count))
+
+        for i in range(m.layerCount()):
+            l = m.layerAt(i)
+
+            if l.isTileLayer():
+                tiles = l.asTileLayer()
+                for y in range(tiles.height()):
+                    for x in range(tiles.width()):
+                        tile = tiles.cellAt(x, y).tile()
+
+                        if tile == None:
+                            continue
+                        if tile.type() != "core.map_chip":
+                            raise Exception(
+                                "The tile at ({},{}) does not come from the core.map_chip atlas, but is from '{}'. (Did you insert a character/item tile by accident?".format(x / 48, y / 48, tile.type()))
+                        tile_atlas = tile.propertyAsString("atlas")
+                        if tile_atlas != map_atlas:
+                            raise Exception(
+                                "The tile at ({},{}) is from atlas '{}', but this map's atlas is '{}'.".format(
+                                    x / 48, y / 48, tile_atlas, map_atlas))
+            elif l.isObjectGroup():
+                objs = l.asObjectGroup()
+
+                for i in range(objs.objectCount()):
+                    obj = objs.objectAt(i)
+
+                    if obj.effectiveType() == "core.map_chip":
+                        raise Exception(
+                            "The object at ({},{}) is of type core.map_chip. (Did you insert a map tile as an object by accident?".format(obj.x() / 48, obj.y() / 48))
         return True
 
     @classmethod
@@ -202,20 +252,26 @@ class ElonaFoobar(T.Plugin):
         m.setOrientation(T.Tiled.Map.Orthogonal)
         m.setRenderOrder(T.Tiled.Map.RightDown)
 
-        if not ElonaFoobar.validate(m):
-            return False
-
         is_new_map = m.tilesetCount() == 0
         if is_new_map:
+            print("NEW MAP")
             mdata = {
                 "width": m.width(),
                 "height": m.height(),
                 "atlas": 1,
-                "regen": 0,
-                "stairup": 0,
+                "next_regenerate_date": 0,
+                "stair_up_pos": 0,
+                "stair_down_pos": 0,
+                "bgm": "",
+                "max_item_count": 0,
+                "should_regenerate": True,
+                "max_crowd_density": m.width() * m.height() / 100
             }
             foo = ElonaFoobar(mdata)
             ElonaFoobar.init_map(foo, m)
+
+        if not ElonaFoobar.validate(m):
+            return False
 
         with gzip.open(splitext(filename)[0] + ".fmp", "wb") as out:
             out.write(pack("4s", b"FMP "))
@@ -242,6 +298,7 @@ class ElonaFoobar(T.Plugin):
 
             out.write(pack("I", m.layerCount()))
 
+            print("LAYER COUNT WRITE {}".format(m.layerCount()))
             for i in range(m.layerCount()):
                 l = m.layerAt(i)
                 write_layer(out, m, l, i, property_names)
@@ -263,12 +320,13 @@ def collect_mods_used(m):
             for y in range(mdata.height()):
                 for x in range(mdata.width()):
                     tile = mdata.cellAt(x, y).tile()
+                    if tile == None:
+                        continue
 
-                    if tile != None:
-                        data_id = tile.propertyAsString("data_id")
-                        mod, name = data_id.split(".")
-                        if not mod in mods:
-                            mods.add(mod)
+                    data_id = tile.propertyAsString("data_id")
+                    mod, name = data_id.split(".")
+                    if not mod in mods:
+                        mods.add(mod)
 
         # objects
         elif l.isObjectGroup():
@@ -282,7 +340,6 @@ def collect_mods_used(m):
                     mods.add(mod)
 
                 data_id = o.cell().tile().propertyAsString("data_id")
-                print(data_id)
                 mod, name = data_id.split(".")
                 if not mod in mods:
                     mods.add(mod)
@@ -297,7 +354,6 @@ class Mapping():
 
     def add(self, key):
         if not key in self.names_to_ids:
-            print("get key " + key)
             self.names_to_ids[key] = self.i
             self.i += 1
 
@@ -305,6 +361,7 @@ class Mapping():
 def collect_property_names(m):
     print("collect property names")
     mapping = Mapping()
+    default_tile = get_default_tile(m)
 
     # map
     for key in m.properties().keys():
@@ -317,16 +374,17 @@ def collect_property_names(m):
         # tiles
         if l.isTileLayer():
             mdata = l.asTileLayer()
-            print("collect tile " + mdata.name() + " " + str(mdata.isEmpty()))
             print(str(mdata.width()) + " " + str(mdata.height()))
             for y in range(mdata.height()):
                 for x in range(mdata.width()):
                     # tile property names
-                    tile = mdata.cellAt(x, y).tile()
-                    if tile != None:
-                        mapping.add(tile.propertyAsString("data_id"))
-                        for key in tile.properties().keys():
-                            mapping.add(key)
+                    cell = mdata.cellAt(x, y)
+                    tile = cell.tile()
+                    if tile == None:
+                        continue
+                    mapping.add(tile.propertyAsString("data_id"))
+                    for key in tile.properties().keys():
+                        mapping.add(key)
 
         # objects
         elif l.isObjectGroup():
@@ -400,6 +458,15 @@ def write_properties(out, m, names_to_ids):
         write_typed_value(out, prop, prop_type)
 
 
+def get_default_tile(m):
+    default_id = "core." + m.propertyAsString("atlas") + "_0"
+    default_tile = find_map_tile_across_all_tilesets(
+        m, default_id)
+    if default_tile == None:
+        raise Exception("Could not find default tile '{}'".format(default_id))
+    return default_tile
+
+
 def read_tiles(fh, width, height, ids_to_names):
     raw_tiles = list(
         unpack("I" * (width * height), fh.read(width * height * 4)))
@@ -413,10 +480,19 @@ def write_tiles(out, m, names_to_ids):
 
             for y in range(mdata.height()):
                 for x in range(mdata.width()):
-                    tile = mdata.cellAt(x, y).tile()
-                    if tile != None:
+                    cell = mdata.cellAt(x, y)
+                    tile = cell.tile()
+                    if tile == None:
+                        data_id = "core." + m.propertyAsString("atlas") + "_0"
+                    else:
                         data_id = tile.propertyAsString("data_id")
-                        out.write(pack("I", names_to_ids[data_id]))
+                    out.write(pack("I", names_to_ids[data_id]))
+
+            # Only write the first tile layer found. The format
+            # assumes that only (width * height) tiles are written,
+            # and having more than one layer will cause an error on
+            # load.
+            break
 
 
 def write_layer(out, m, layer, layer_id, names_to_ids):
@@ -472,7 +548,6 @@ def read_layer(fh, ids_to_names):
         # object group
         obj_count = unpack("I", fh.read(4))[0]
         for i in range(obj_count):
-            print("obj")
             o = read_object(fh, ids_to_names)
             pprint(o)
             objs.append(o)
@@ -523,8 +598,8 @@ def write_object(out, obj, names_to_ids):
     name = obj.name()
     x = floor(obj.x() / 48.0)
     y = floor(obj.y() / 48.0) - 1
-    if obj.height() == 96:
-        y += 1
+    # if obj.height() == 96:
+    #     y += 1
 
     out.write(pack("IIIII", names_to_ids[data_id],
                    names_to_ids[data_type], names_to_ids[name], x, y))
@@ -552,6 +627,17 @@ def find_object_tile(tileset, data_id, cache):
         if tile.propertyAsString("data_id") == data_id:
             cache[data_id] = tile.id()
             return tile
+    return None
+
+
+def find_map_tile_across_all_tilesets(m, data_id):
+    cache = dict()
+    for i in range(m.tilesetCount()):
+        ts = m.tilesetAt(i).data()
+        if ts.name() == "core.map_chip":
+            tile = find_object_tile(ts, data_id, cache)
+            if tile != None:
+                return tile
     return None
 
 
@@ -594,8 +680,8 @@ def load_objects(m, object_group, d):
         y = obj["y"] + 1
         width = tile.width()
         height = tile.height()
-        if height == 96:
-            y -= 1
+        # if height == 96:
+        #     y -= 1
 
         map_object = T.Tiled.MapObject(name, data_type, T.qt.QPointF(
             x * 48, y * 48), T.qt.QSizeF(width, height))

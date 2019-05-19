@@ -100,6 +100,13 @@ class Elona(T.Plugin):
         m.setProperty("next_regenerate_date", el.mdata.regen)
         m.setProperty("stair_up_pos", el.mdata.stairup)
 
+        m.setProperty("stair_down_pos", 0)
+        m.setProperty("bgm", "")
+        m.setProperty("max_item_count", 0)
+        m.setProperty("should_regenerate", True)
+        m.setProperty("max_crowd_density", el.mdata.width *
+                      el.mdata.height / 100)
+
         base_directory = dirname(realpath(__file__))
         load_tilesets(m, el.mdata.atlas, base_directory)
 
@@ -124,17 +131,17 @@ class Elona(T.Plugin):
     cell_objs = {0: (21, 726, 726),   # dummy
                  1: (21, 726, 726),   # 扉99
                  2: (21, 726, 726),   # 扉0
-                 3: (14, 234, 0),   # 罠
-                 4: (14, 234, 0),   # 罠
+                 3: (14, 234, 0),     # 罠
+                 4: (14, 234, 0),     # 罠
                  5: (10, 232, 232),   # 昇り階段
                  6: (11, 231, 231),   # 降り階段
                  7: (21, 728, 728),   # 扉SF
                  8: (23, 727, 727),   # 掲示板
                  9: (31, 729, 729),   # 投票箱
-                 10: (32, 234, 0),  # メダル
+                 10: (32, 234, 0),    # メダル
                  11: (21, 730, 730),  # 扉JP
-                 12: (21, 732, 730),  # 街掲示板
-                 13: (21, 733, 730),  # 扉JAIL
+                 12: (21, 732, 732),  # 街掲示板
+                 13: (21, 733, 733),  # 扉JAIL
                  }
 
     def __init__(self, f):
